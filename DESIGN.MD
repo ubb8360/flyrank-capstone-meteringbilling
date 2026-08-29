@@ -198,6 +198,7 @@ A subscription points to a plan, which determines the tenant's monthly usage lim
 For now, usage totals will be calculated from the individual `usage_events` instead of keeping another monthly totals table.
 
 A separate totals table could make reads faster in a much larger system, but it would also mean keeping another value synchronized. Since this capstone will have a small amount of test data, calculating the totals from the events is simpler and easier for me to verify.
+
 ---
 
 ## API Design
@@ -512,3 +513,334 @@ For the core version, I plan to use a simple API-key based approach where the re
 The exact authentication implementation will be finalized while building the API.
 
 This is intentionally simpler than a full user login system because authentication is not the main focus of the capstone, but the API still needs a real way to keep tenant data separated.
+
+---
+
+## Architecture
+
+I want to keep the project separated into a few basic layers instead of putting all of the billing logic directly inside the FastAPI routes.
+
+The general flow will be:
+
+```text
+Client / Stripe
+      |
+      v
+-------------------------
+API Layer
+-------------------------
+FastAPI routes
+Request validation
+Status codes / responses
+      |
+      v
+-------------------------
+Service Layer
+-------------------------
+Metering logic
+Quota checks
+Pricing calculations
+Subscription logic
+      |
+      v
+-------------------------
+Repository / Data Layer
+-------------------------
+Database queries
+Create/read usage events
+Tenant and plan lookups
+Subscription updates
+      |
+      v
+-------------------------
+PostgreSQL
+-------------------------
+tenants
+plans
+subscriptions
+usage_events
+stripe_events
+```
+
+The main idea is:
+
+```text
+API -> Services -> Repositories -> Database
+```
+
+I have used this type of separation before in smaller backend projects, and I think it makes sense here because the billing rules should not depend directly on FastAPI.
+
+For example, the quota logic should be something I can test without needing to send an actual HTTP request every time.
+
+I do not plan to make every class use interfaces or abstract base classes. That would probably be useful in a much larger project, but for this capstone I mainly want the different responsibilities to stay separated and understandable.
+
+---
+
+### API Layer
+
+The API layer will contain the FastAPI routes.
+
+Its main responsibilities will be:
+
+- Accept incoming requests
+- Validate request data
+- Read headers such as `Idempotency-Key`
+- Authenticate the tenant
+- Call the correct service
+- Return the correct HTTP response and status code
+
+I want to avoid putting database queries or large amounts of billing logic directly inside the route functions.
+
+A route should mostly handle the HTTP side of the request and then pass the actual work to a service.
+
+---
+
+### Service Layer
+
+The service layer will contain most of the actual billing rules.
+
+I currently expect to have services similar to:
+
+```text
+MeterService
+QuotaService
+PricingService
+SubscriptionService
+```
+
+`MeterService` will probably handle the main billable request flow.
+
+It will work with the other services to:
+
+1. Check for duplicate requests
+2. Load the tenant's plan
+3. Check the quota
+4. Calculate the cost
+5. Record the usage event
+
+`QuotaService` will contain the logic for checking whether new usage is allowed.
+
+`PricingService` will handle API and AI-token cost calculations.
+
+`SubscriptionService` will handle subscription changes caused by Stripe events.
+
+These may change a little once I start implementing the project. I am using them as a starting point instead of trying to design every class before writing any code.
+
+---
+
+### Repository / Data Layer
+
+The repository layer will handle database access.
+
+I expect to have repository code for things such as:
+
+- Tenants
+- Plans
+- Subscriptions
+- Usage events
+- Stripe events
+
+For example, instead of having the metering service contain SQL for checking an idempotency key, it could call something similar to:
+
+```text
+usage_repository.get_by_idempotency_key(...)
+```
+
+The repository would handle the actual PostgreSQL query.
+
+This should keep the service code focused more on billing decisions instead of database details.
+
+I am not planning to build a completely generic repository framework. The repository functions will just cover the database operations this project actually needs.
+
+---
+
+## Main Application Flows
+
+### Billable Request
+
+The main `/generate` flow should roughly look like this:
+
+```text
+POST /generate
+      |
+      v
+Validate request
+      |
+      v
+Authenticate tenant
+      |
+      v
+Check Idempotency-Key
+      |
+      +------ duplicate ------> Return existing result
+      |
+      v
+Load subscription + plan
+      |
+      v
+Check current usage + quota
+      |
+      +------ over limit -----> Return 429 / 402
+      |
+      v
+Calculate cost
+      |
+      v
+Store usage event
+      |
+      v
+Return result
+```
+
+This is probably the most important flow in the project because it connects idempotency, quotas, pricing, and persistence.
+
+---
+
+### Usage Summary
+
+The `/usage` flow should be simpler:
+
+```text
+GET /usage
+     |
+     v
+Authenticate tenant
+     |
+     v
+Load plan + subscription
+     |
+     v
+Read current-period usage events
+     |
+     v
+Calculate totals
+     |
+     v
+Return used / limit / cost
+```
+
+For now, I will calculate the totals from the usage events each time instead of maintaining a separate summary table.
+
+---
+
+### Stripe Webhook
+
+The Stripe webhook flow should look roughly like:
+
+```text
+Stripe
+  |
+  v
+POST /webhooks/stripe
+  |
+  v
+Verify signature
+  |
+  +------ invalid ------> 400
+  |
+  v
+Check Stripe event ID
+  |
+  +------ duplicate ----> Ignore safely
+  |
+  v
+Process supported event
+  |
+  v
+Update subscription
+  |
+  v
+Record processed event ID
+```
+
+I want the signature check to happen before making any subscription changes.
+
+The client should not be able to directly tell the backend that a Stripe payment succeeded.
+
+---
+
+## Planned Project Structure
+
+The project structure will probably start similar to this:
+
+```text
+app/
+├── main.py
+├── api/
+│   ├── health.py
+│   ├── usage.py
+│   ├── billing.py
+│   └── webhooks.py
+├── services/
+│   ├── meter_service.py
+│   ├── quota_service.py
+│   ├── pricing_service.py
+│   └── subscription_service.py
+├── repositories/
+│   ├── tenant_repository.py
+│   ├── plan_repository.py
+│   ├── subscription_repository.py
+│   ├── usage_repository.py
+│   └── stripe_event_repository.py
+├── models/
+├── schemas/
+├── jobs/
+├── config.py
+└── database.py
+
+tests/
+```
+
+This is only the planned structure.
+
+I may combine or rename some files if they end up being very small. I do not want to create a bunch of files just for the sake of having more layers.
+
+The important part is that the API, billing logic, and database access stay reasonably separated.
+
+---
+
+## Background Job Plan
+
+The shared capstone requirements ask for at least one background job.
+
+I do not need the background job for the main metering request itself, because usage and quota checks need to happen immediately.
+
+Later in the project, I plan to add one small background task related to billing maintenance or reconciliation.
+
+The exact job will be decided once the core billing and Stripe flows are working.
+
+I am leaving this slightly open for now because I do not want to design a complicated job before I know what the application actually needs.
+
+---
+
+## Explicit Non-Goal
+
+This project is not meant to be a complete production billing platform.
+
+The core version will **not** implement:
+
+- Real payments
+- Invoices
+- Proration
+- Overage billing
+- Multiple currencies
+- A customer billing frontend
+- A full user account/login system
+- Real AI model calls
+- A complete history of every subscription change
+
+Stripe will only run in test mode.
+
+AI-token usage will also be simulated instead of calling an actual AI provider.
+
+The main goal is to learn and demonstrate the parts that are important to this capstone:
+
+- Usage metering
+- Idempotency
+- Quota enforcement
+- Correct cost calculations
+- Tenant separation
+- Stripe webhook verification
+- Duplicate webhook handling
+
+There are more features that could make this closer to a real billing product, but I would rather have a smaller project where these core parts work correctly and are well tested.
