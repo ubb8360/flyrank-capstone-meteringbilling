@@ -46,10 +46,13 @@ Represents a customer or organization using the service.
 | `id` | UUID | Primary identifier |
 | `name` | VARCHAR | Tenant name |
 | `created_at` | TIMESTAMP | When the tenant was created |
+| `api_key_hash` | VARCHAR | Hashed API key used to identify the tenant |
 
 Each usage event and subscription will belong to a tenant.
 
-Using tenants also gives the project a basic multi-tenant setup instead of treating every customer as part of the same account.
+For the core version of the project, each tenant will also have one API key used to identify it when making requests. Only a hash of the key will be stored in the database instead of storing the original key directly.
+
+Using tenants gives the project a basic multi-tenant setup instead of treating every customer as part of the same account. I am keeping it to one API key per tenant because key rotation and multiple keys per customer are outside the main scope of this project.
 
 ---
 
@@ -195,3 +198,317 @@ A subscription points to a plan, which determines the tenant's monthly usage lim
 For now, usage totals will be calculated from the individual `usage_events` instead of keeping another monthly totals table.
 
 A separate totals table could make reads faster in a much larger system, but it would also mean keeping another value synchronized. Since this capstone will have a small amount of test data, calculating the totals from the events is simpler and easier for me to verify.
+---
+
+## API Design
+
+I want to keep the API fairly small because the main point of this capstone is the billing logic, not building a large number of endpoints.
+
+For the core project, I plan to have five main endpoints:
+
+- `GET /health`
+- `POST /generate`
+- `GET /usage`
+- `POST /billing/checkout`
+- `POST /webhooks/stripe`
+
+The `/generate` endpoint will be the main billable endpoint. It will simulate API and AI usage instead of calling a real AI model.
+
+---
+
+### `GET /health`
+
+Basic health check to make sure the FastAPI application is running.
+
+Example response:
+
+```json
+{
+  "status": "healthy"
+}
+```
+
+This endpoint is mostly for setup, Docker testing, and making it easy to tell if the API started correctly.
+
+---
+
+### `POST /generate`
+
+This will be the dummy billable endpoint for the project.
+
+It will simulate an action that would normally cost money in a SaaS application.
+
+Instead of actually generating AI content, the request will provide usage information that the billing system can meter.
+
+A request will also need an idempotency key.
+
+Example header:
+
+```text
+Idempotency-Key: generate-demo-001
+```
+
+For a basic API call, the request could look like:
+
+```json
+{
+  "usage_type": "api_call",
+  "quantity": 1
+}
+```
+
+For simulated AI usage:
+
+```json
+{
+  "usage_type": "ai_tokens",
+  "input_tokens": 1000,
+  "cached_input_tokens": 200,
+  "output_tokens": 500,
+  "reasoning_tokens": 100
+}
+```
+
+The server will validate these values and use them to determine the amount of usage and cost.
+
+I am keeping API-call usage and AI-token usage on the same endpoint because I only need one billable action to demonstrate the metering system.
+
+Later, if this were a larger application, different product endpoints could call the same metering service internally.
+
+
+### Basic Request Flow
+
+For an accepted request, the endpoint should roughly do the following:
+
+1. Identify the tenant making the request.
+2. Validate the request and the `Idempotency-Key`.
+3. Check if the idempotency key was already used.
+4. Load the tenant's current subscription and plan.
+5. Calculate the tenant's current monthly usage.
+6. Check whether the new request would go over the quota.
+7. Calculate the cost of the request.
+8. Store one `usage_event`.
+9. Return the result.
+
+I do not plan to put all of this logic directly inside the FastAPI route. The route should mainly validate the HTTP request and call the service layer.
+
+---
+
+## Quota Behavior
+
+The basic quota rule will be:
+
+```text
+current usage + requested usage <= plan limit
+```
+
+If that is true, the request is allowed.
+
+If the request would make usage go above the plan limit, it will be rejected.
+
+For example, on the Free plan:
+
+```text
+Current API calls: 999
+Requested: 1
+
+999 + 1 = 1000
+
+Allowed
+```
+
+But:
+
+```text
+Current API calls: 1000
+Requested: 1
+
+1000 + 1 = 1001
+
+Rejected
+```
+
+I chose to allow the request that reaches the limit exactly because it makes the boundary easy to explain and test.
+
+A normal usage quota being exceeded will return:
+
+```text
+429 Too Many Requests
+```
+
+The response should include a useful message instead of only returning the status code.
+
+Example:
+
+```json
+{
+  "detail": "Monthly API call quota exceeded."
+}
+```
+
+A `402 Payment Required` response will be used when the issue is related to the subscription or payment state instead of normal usage.
+
+For example, a tenant that needs to upgrade or does not have a valid paid subscription could receive a `402`.
+
+I want to keep the difference simple:
+
+```text
+429 = usage limit problem
+402 = subscription/payment problem
+```
+
+---
+
+### `GET /usage`
+
+Returns the current tenant's usage information for the active billing period.
+
+Example response:
+
+```json
+{
+  "plan": "free",
+  "subscription_status": "active",
+  "api_calls": {
+    "used": 425,
+    "limit": 1000
+  },
+  "ai_tokens": {
+    "used": 42000,
+    "limit": 100000
+  },
+  "cost_microusd": 12500
+}
+```
+
+The totals will be calculated from the tenant's `usage_events`.
+
+For this capstone, I am okay with calculating the totals when the endpoint is requested instead of keeping another summary table updated.
+
+With the small amount of test data in this project, that should be simple enough and easier to verify.
+
+---
+
+### `POST /billing/checkout`
+
+Creates a Stripe Checkout session in test mode.
+
+The main use for this endpoint will be upgrading a tenant from Free to Pro.
+
+The endpoint should return the Stripe Checkout URL so the test checkout can be completed.
+
+One important part of the design is that calling this endpoint will **not** immediately change the tenant to Pro.
+
+The plan change should only happen after Stripe sends a verified webhook confirming the subscription.
+
+This keeps the application from trusting a client that simply says a payment succeeded.
+
+---
+
+### `POST /webhooks/stripe`
+
+Receives Stripe webhook events.
+
+The main events I expect to support are:
+
+```text
+checkout.session.completed
+customer.subscription.updated
+customer.subscription.deleted
+```
+
+The endpoint should:
+
+1. Read the incoming webhook.
+2. Verify the Stripe signature.
+3. Return `400 Bad Request` if the signature is invalid.
+4. Check whether the Stripe event ID has already been processed.
+5. Ignore the event if it is a duplicate.
+6. Update the tenant's subscription if the event is valid.
+7. Store the Stripe event ID after it is handled.
+
+I am only planning to support the Stripe events needed for the capstone instead of trying to handle every event Stripe can send.
+
+---
+
+## Idempotency Strategy
+
+Idempotency is one of the main parts of this project.
+
+Every billable request to `POST /generate` must contain an `Idempotency-Key`.
+
+For example:
+
+```text
+Idempotency-Key: generate-demo-001
+```
+
+The idea is that one idempotency key represents one logical billable action.
+
+### First Request
+
+The first time the request is received:
+
+```text
+generate-demo-001
+        |
+        v
+No existing usage event
+        |
+        v
+Check quota
+        |
+        v
+Calculate cost
+        |
+        v
+Store usage event
+        |
+        v
+Return result
+```
+
+### Retried Request
+
+If the client retries the same request:
+
+```text
+generate-demo-001
+        |
+        v
+Existing usage event found
+        |
+        v
+Do not create another event
+        |
+        v
+Return the existing result
+```
+
+This means a network retry should not cause the customer's usage to increase twice.
+
+The application code will check for an existing event first, but PostgreSQL will also enforce the unique constraint:
+
+```text
+(tenant_id, idempotency_key)
+```
+
+I am using both because the Python check makes the normal retry behavior easy to handle, while the database constraint protects against a situation where two requests arrive very close together.
+
+For the scope of this project, I am not trying to build a full reusable idempotency framework. I only need it on the billable action where duplicate processing would affect usage.
+
+Stripe webhooks will use a similar idea, but they will be deduplicated using Stripe's own event IDs stored in the `stripe_events` table.
+
+---
+
+## Tenant Identification
+
+Every billable request and usage query needs to be associated with one tenant.
+
+I do not want the client to be able to simply send any `tenant_id` in the request body and access another tenant's information.
+
+For the core version, I plan to use a simple API-key based approach where the request is authenticated and the backend determines which tenant the key belongs to.
+
+The exact authentication implementation will be finalized while building the API.
+
+This is intentionally simpler than a full user login system because authentication is not the main focus of the capstone, but the API still needs a real way to keep tenant data separated.
