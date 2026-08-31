@@ -2,7 +2,7 @@ from fastapi import FastAPI
 
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
-
+from app.api.usage import router as usage_router
 
 app = FastAPI(
     title="Usage Metering & Billing Engine",
@@ -12,6 +12,7 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(usage_router)
 
 
 @app.get("/")
