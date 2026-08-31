@@ -15,6 +15,7 @@ from app.services.meter_service import (
     QuotaExceededError,
     SubscriptionUnavailableError,
     record_api_call,
+    record_ai_tokens,
 )
 
 
@@ -39,11 +40,23 @@ def generate(
     db: Session = Depends(get_db),
 ):
     try:
-        event = record_api_call(
-            db=db,
-            tenant=tenant,
-            idempotency_key=idempotency_key
-        )
+        if request.usage_type == "api_call":
+            event = record_api_call(
+                db=db,
+                tenant=tenant,
+                idempotency_key=idempotency_key
+            )
+
+        else:
+            event = record_ai_tokens(
+                db=db,
+                tenant=tenant,
+                idempotency_key=idempotency_key,
+                input_tokens=request.input_tokens or 0,
+                cached_input_tokens=request.cached_input_tokens or 0,
+                output_tokens=request.output_tokens or 0,
+                reasoning_tokens=request.reasoning_tokens or 0,
+            )
 
     except QuotaExceededError as exc:
         raise HTTPException(
@@ -57,10 +70,20 @@ def generate(
             detail=str(exc)
         )
 
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc)
+        )
+
     return GenerateResponse(
         event_id=event.id,
         usage_type=event.usage_type,
         quantity=event.quantity,
         cost_microusd=event.cost_microusd,
-        idempotency_key=event.idempotency_key
+        idempotency_key=event.idempotency_key,
+        input_tokens=event.input_tokens,
+        cached_input_tokens=event.cached_input_tokens,
+        output_tokens=event.output_tokens,
+        reasoning_tokens=event.reasoning_tokens,
     )

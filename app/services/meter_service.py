@@ -9,6 +9,7 @@ from app.repositories.usage_repo import (
     create_usage_event,
     get_by_idempotency_key,
     get_monthly_api_usage,
+    get_monthly_ai_usage,
 )
 
 
@@ -90,6 +91,101 @@ def record_api_call(
 
         # Another copy of the same request may have been
         # inserted between our first check and the insert.
+        existing_event = get_by_idempotency_key(
+            db,
+            tenant.id,
+            idempotency_key
+        )
+
+        if existing_event is not None:
+            return existing_event
+
+        raise
+
+def record_ai_tokens(
+    db: Session,
+    tenant: Tenant,
+    idempotency_key: str,
+    input_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    output_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> UsageEvent:
+
+    existing_event = get_by_idempotency_key(
+        db,
+        tenant.id,
+        idempotency_key
+    )
+
+    if existing_event is not None:
+        return existing_event
+
+    subscription_data = get_subscription_with_plan(
+        db,
+        tenant.id
+    )
+
+    if subscription_data is None:
+        raise SubscriptionUnavailableError(
+            "Tenant does not have a subscription."
+        )
+
+    subscription, plan = subscription_data
+
+    if subscription.status != "active":
+        raise SubscriptionUnavailableError(
+            "Subscription is not active."
+        )
+
+    requested_usage = (
+        input_tokens
+        + cached_input_tokens
+        + output_tokens
+        + reasoning_tokens
+    )
+
+    if requested_usage <= 0:
+        raise ValueError(
+            "AI token usage must be greater than zero."
+        )
+
+    current_usage = get_monthly_ai_usage(
+        db,
+        tenant.id
+    )
+
+    if current_usage + requested_usage > plan.ai_token_limit:
+        raise QuotaExceededError(
+            "Monthly AI token quota exceeded."
+        )
+
+    usage_event = UsageEvent(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        usage_type="ai_tokens",
+        quantity=requested_usage,
+
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+
+        # Add real pricing later.
+        cost_microusd=0,
+
+        idempotency_key=idempotency_key
+    )
+
+    try:
+        return create_usage_event(
+            db,
+            usage_event
+        )
+
+    except IntegrityError:
+        db.rollback()
+
         existing_event = get_by_idempotency_key(
             db,
             tenant.id,
