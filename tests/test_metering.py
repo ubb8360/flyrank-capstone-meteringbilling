@@ -10,6 +10,7 @@ from app.services.meter_service import (
     QuotaExceededError,
     SubscriptionUnavailableError,
     record_api_call,
+    record_ai_tokens,
 )
 
 
@@ -231,3 +232,150 @@ def test_inactive_subscription_is_rejected(test_account):
     ).scalar_one()
 
     assert event_count == 0
+    
+def test_ai_token_usage_is_recorded(test_account):
+    db, tenant, _, _ = test_account
+
+    event = record_ai_tokens(
+        db=db,
+        tenant=tenant,
+        idempotency_key="ai-record-test-001",
+        input_tokens=300,
+        cached_input_tokens=100,
+        output_tokens=200,
+        reasoning_tokens=50,
+    )
+
+    assert event.usage_type == "ai_tokens"
+    assert event.quantity == 650
+
+    assert event.input_tokens == 300
+    assert event.cached_input_tokens == 100
+    assert event.output_tokens == 200
+    assert event.reasoning_tokens == 50
+
+    assert event.cost_microusd == 0
+
+
+def test_duplicate_ai_request_creates_one_event(test_account):
+    db, tenant, _, _ = test_account
+
+    first_event = record_ai_tokens(
+        db=db,
+        tenant=tenant,
+        idempotency_key="ai-duplicate-test-001",
+        input_tokens=200,
+        cached_input_tokens=50,
+        output_tokens=100,
+        reasoning_tokens=25,
+    )
+
+    second_event = record_ai_tokens(
+        db=db,
+        tenant=tenant,
+        idempotency_key="ai-duplicate-test-001",
+        input_tokens=200,
+        cached_input_tokens=50,
+        output_tokens=100,
+        reasoning_tokens=25,
+    )
+
+    assert first_event.id == second_event.id
+
+    event_count = db.execute(
+        select(func.count())
+        .select_from(UsageEvent)
+        .where(
+            UsageEvent.tenant_id == tenant.id,
+            UsageEvent.idempotency_key == "ai-duplicate-test-001",
+        )
+    ).scalar_one()
+
+    assert event_count == 1
+
+
+def test_ai_token_exact_quota_is_allowed(test_account):
+    db, tenant, _, plan = test_account
+
+    first_event = record_ai_tokens(
+        db=db,
+        tenant=tenant,
+        idempotency_key="ai-boundary-test-001",
+        input_tokens=600,
+    )
+
+    second_event = record_ai_tokens(
+        db=db,
+        tenant=tenant,
+        idempotency_key="ai-boundary-test-002",
+        output_tokens=400,
+    )
+
+    assert first_event.quantity == 600
+    assert second_event.quantity == 400
+
+    total_usage = db.execute(
+        select(
+            func.coalesce(
+                func.sum(UsageEvent.quantity),
+                0
+            )
+        ).where(
+            UsageEvent.tenant_id == tenant.id,
+            UsageEvent.usage_type == "ai_tokens",
+        )
+    ).scalar_one()
+
+    assert total_usage == plan.ai_token_limit
+    assert total_usage == 1000
+
+
+def test_ai_token_over_quota_is_rejected(test_account):
+    db, tenant, _, _ = test_account
+
+    record_ai_tokens(
+        db=db,
+        tenant=tenant,
+        idempotency_key="ai-over-test-001",
+        input_tokens=700,
+    )
+
+    record_ai_tokens(
+        db=db,
+        tenant=tenant,
+        idempotency_key="ai-over-test-002",
+        output_tokens=300,
+    )
+
+    with pytest.raises(
+        QuotaExceededError,
+        match="Monthly AI token quota exceeded"
+    ):
+        record_ai_tokens(
+            db=db,
+            tenant=tenant,
+            idempotency_key="ai-over-test-003",
+            output_tokens=1,
+        )
+
+    event_count = db.execute(
+        select(func.count())
+        .select_from(UsageEvent)
+        .where(
+            UsageEvent.tenant_id == tenant.id,
+            UsageEvent.usage_type == "ai_tokens",
+        )
+    ).scalar_one()
+
+    assert event_count == 2
+
+    rejected_event_count = db.execute(
+        select(func.count())
+        .select_from(UsageEvent)
+        .where(
+            UsageEvent.tenant_id == tenant.id,
+            UsageEvent.idempotency_key == "ai-over-test-003",
+        )
+    ).scalar_one()
+
+    assert rejected_event_count == 0
