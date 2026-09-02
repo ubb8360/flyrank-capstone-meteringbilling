@@ -113,6 +113,9 @@ def test_duplicate_idempotency_key_creates_one_event(test_account):
     )
 
     assert first_event.id == second_event.id
+    assert first_event.cost_microusd == 100
+    assert second_event.cost_microusd == 100
+
 
     event_count = db.execute(
         select(func.count())
@@ -254,7 +257,7 @@ def test_ai_token_usage_is_recorded(test_account):
     assert event.output_tokens == 200
     assert event.reasoning_tokens == 50
 
-    assert event.cost_microusd == 0
+    assert event.cost_microusd == 718
 
 
 def test_duplicate_ai_request_creates_one_event(test_account):

@@ -11,7 +11,10 @@ from app.repositories.usage_repo import (
     get_monthly_api_usage,
     get_monthly_ai_usage,
 )
-
+from app.services.pricing_service import (
+    calculate_ai_cost_microusd,
+    calculate_api_call_cost_microusd,
+)
 
 class QuotaExceededError(Exception):
     pass
@@ -73,12 +76,11 @@ def record_api_call(
         tenant_id=tenant.id,
         usage_type="api_call",
         quantity=1,
-
-        # API-call pricing will be added later.
-        cost_microusd=0,
-
-        idempotency_key=idempotency_key
-    )
+        cost_microusd=calculate_api_call_cost_microusd(
+            quantity=1
+        ),
+        idempotency_key=idempotency_key,
+    ) 
 
     try:
         return create_usage_event(
@@ -158,6 +160,13 @@ def record_ai_tokens(
             "Monthly AI token quota exceeded."
         )
 
+    cost_microusd = calculate_ai_cost_microusd(
+    input_tokens=input_tokens,
+    cached_input_tokens=cached_input_tokens,
+    output_tokens=output_tokens,
+    reasoning_tokens=reasoning_tokens,
+    )
+    
     usage_event = UsageEvent(
         id=uuid.uuid4(),
         tenant_id=tenant.id,
@@ -169,8 +178,7 @@ def record_ai_tokens(
         output_tokens=output_tokens,
         reasoning_tokens=reasoning_tokens,
 
-        # Add real pricing later.
-        cost_microusd=0,
+        cost_microusd=cost_microusd,
 
         idempotency_key=idempotency_key
     )
