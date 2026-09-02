@@ -12,7 +12,9 @@ from app.repositories.stripe_event_repo import (
     get_stripe_event,
 )
 from app.repositories.subscription_repo import (
+    downgrade_subscription_from_stripe,
     update_subscription_from_checkout,
+    update_subscription_status_from_stripe,
 )
 
 
@@ -74,12 +76,11 @@ async def stripe_webhook(
             "event_id": event_id,
         }
 
+    # Handle a completed Stripe Checkout session.
     if event_type == "checkout.session.completed":
         session = event["data"]["object"].to_dict()
 
-        # This project only handles subscription Checkout sessions.
-        # Other Checkout events are valid Stripe events but are not
-        # related to our Pro upgrade flow.
+        # This project only uses subscription Checkout sessions.
         if session.get("mode") != "subscription":
             add_stripe_event(
                 db=db,
@@ -119,6 +120,7 @@ async def stripe_webhook(
 
         try:
             parsed_tenant_id = UUID(tenant_id)
+
         except (ValueError, TypeError):
             raise HTTPException(
                 status_code=400,
@@ -138,6 +140,43 @@ async def stripe_webhook(
                 detail="Tenant subscription was not found.",
             )
 
+    # Keep the local subscription status synced with Stripe.
+    elif event_type == "customer.subscription.updated":
+        stripe_subscription = event["data"]["object"].to_dict()
+
+        stripe_subscription_id = stripe_subscription["id"]
+        stripe_status = stripe_subscription["status"]
+
+        updated_subscription = update_subscription_status_from_stripe(
+            db=db,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_status=stripe_status,
+        )
+
+        if updated_subscription is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Stripe subscription was not found.",
+            )
+
+    # When the paid subscription ends, move the tenant back to Free.
+    elif event_type == "customer.subscription.deleted":
+        stripe_subscription = event["data"]["object"].to_dict()
+
+        stripe_subscription_id = stripe_subscription["id"]
+
+        downgraded_subscription = downgrade_subscription_from_stripe(
+            db=db,
+            stripe_subscription_id=stripe_subscription_id,
+        )
+
+        if downgraded_subscription is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Stripe subscription was not found.",
+            )
+
+    # Record every successfully handled Stripe event.
     add_stripe_event(
         db=db,
         event_id=event_id,
