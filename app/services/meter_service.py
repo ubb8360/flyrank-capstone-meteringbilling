@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError 
 from sqlalchemy.orm import Session
 
 from app.models import Tenant, UsageEvent
@@ -88,9 +88,7 @@ def record_api_call(
 
     except IntegrityError:
         db.rollback()
-
-        # Another copy of the same request may have been
-        # inserted between our first check and the insert.
+        
         existing_event = get_by_idempotency_key(
             db,
             tenant.id,
