@@ -89,3 +89,31 @@ def create_usage_event(
     db.refresh(usage_event)
 
     return usage_event
+
+def get_monthly_cost_microusd(
+    db: Session,
+    tenant_id,
+) -> int:
+    now = datetime.now(timezone.utc)
+
+    month_start = now.replace(
+        day=1,
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    result = db.execute(
+        select(
+            func.coalesce(
+                func.sum(UsageEvent.cost_microusd),
+                0,
+            )
+        ).where(
+            UsageEvent.tenant_id == tenant_id,
+            UsageEvent.created_at >= month_start,
+        )
+    )
+
+    return int(result.scalar_one())

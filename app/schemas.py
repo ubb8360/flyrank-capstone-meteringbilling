@@ -43,3 +43,18 @@ class GenerateResponse(BaseModel):
     cached_input_tokens: int | None = None
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
+
+class UsageAmount(BaseModel):
+    used: int
+    limit: int
+
+
+class UsageSummaryResponse(BaseModel):
+    tenant_id: UUID
+    plan: str
+    subscription_status: str
+
+    api_calls: UsageAmount
+    ai_tokens: UsageAmount
+
+    total_cost_microusd: int
