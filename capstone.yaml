@@ -1,0 +1,33 @@
+run: "uvicorn app.main:app --reload"
+seed: "python -m scripts.seed"
+test: "python -m pytest -v"
+base_url: "http://127.0.0.1:8000"
+
+endpoints:
+  - method: "GET"
+    path: "/health"
+    auth: false
+
+  - method: "POST"
+    path: "/generate"
+    auth: true
+    headers:
+      - "X-API-Key"
+      - "Idempotency-Key"
+
+  - method: "GET"
+    path: "/usage"
+    auth: true
+    headers:
+      - "X-API-Key"
+
+  - method: "POST"
+    path: "/billing/checkout"
+    auth: true
+    headers:
+      - "X-API-Key"
+
+  - method: "POST"
+    path: "/webhooks/stripe"
+    auth: false
+    notes: "Stripe webhook endpoint. Requires a valid Stripe-Signature header."
